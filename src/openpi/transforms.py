@@ -1,5 +1,6 @@
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
+import functools
 import re
 from typing import Protocol, TypeAlias, TypeVar, runtime_checkable
 
@@ -262,8 +263,17 @@ class TokenizePrompt(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        if state is None:
+            tokens, token_masks = _cached_tokenize_prompt(id(self.tokenizer), self.tokenizer, prompt)
+        else:
+            tokens, token_masks = self.tokenizer.tokenize(prompt, state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
+
+
+@functools.lru_cache(maxsize=256)
+def _cached_tokenize_prompt(_tokenizer_id: int, tokenizer: _tokenizer.PaligemmaTokenizer, prompt: str):
+    del _tokenizer_id
+    return tokenizer.tokenize(prompt, None)
 
 
 @dataclasses.dataclass(frozen=True)

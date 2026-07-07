@@ -2,6 +2,7 @@ from collections.abc import Iterator, Sequence
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -12,11 +13,30 @@ import numpy as np
 import torch
 
 import openpi.models.model as _model
+import openpi.policies.aero_handoff_policy as aero_handoff_policy
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
+
+
+AERO_HANDOFF_REPO_ID = "aero_quest/piper_pipette_handoff"
+AERO_HANDOFF_ROOT = pathlib.Path(
+    "/data1/tianang/Projects/SO_AeroHand/outputs/lerobot/piper_pipette_handoff/"
+    "a1_libero_like_train50_eval20_320x320_30fps"
+)
+AERO_HANDOFF_PROMPT = (
+    "Use the original Piper gripper to pick a pipette from the rack, hand it to the Aero Hand palm, "
+    "and close four non-thumb fingers to hold the pipette."
+)
+AERO_HANDOFF_VIDEO_KEYS = (
+    "observation.images.table_overview",
+    "observation.images.gripper_forward",
+    "observation.images.palm_inner",
+)
+IMAGE_CACHE_SIZE = 224
+OLD_AERO_HANDOFF_CTRL_DIM = 16
 
 
 class Dataset(Protocol[T_co]):
@@ -127,6 +147,134 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class AeroHandoffDataset(Dataset):
+    """Local reader for the generated A1 LeRobot v3 dataset.
+
+    The openpi-pinned LeRobot loader expects older per-episode metadata files.
+    The generated SO_AeroHand dataset is a compact v3 chunked parquet/video
+    export, so we read it directly here while preserving the same sample keys
+    expected by openpi transforms.
+    """
+
+    def __init__(self, root: pathlib.Path, action_horizon: int):
+        import pandas as pd
+
+        self._root = root
+        self._action_horizon = action_horizon
+        parquet_files = sorted((root / "data").glob("**/*.parquet"))
+        if len(parquet_files) != 1:
+            raise ValueError(f"Expected one A1 parquet file under {root / 'data'}, found {len(parquet_files)}")
+        table = pd.read_parquet(parquet_files[0])
+        self._states = np.stack(table["observation.state"].map(np.asarray).to_numpy()).astype(np.float32)
+        raw_actions = np.stack(table["action"].map(np.asarray).to_numpy()).astype(np.float32)
+        self._actions = self._convert_actions(raw_actions, self._states)
+        self._stage_index = table["observation.stage_index"].to_numpy(dtype=np.int64)
+        self._timestamp = table["timestamp"].to_numpy(dtype=np.float32)
+        self._frame_index = table["frame_index"].to_numpy(dtype=np.int64)
+        self._episode_index = table["episode_index"].to_numpy(dtype=np.int64)
+        self._index = table["index"].to_numpy(dtype=np.int64)
+        self._task_index = table["task_index"].to_numpy(dtype=np.int64)
+        self._episode_to_indices: dict[int, np.ndarray] = {
+            int(ep): np.flatnonzero(self._episode_index == ep) for ep in np.unique(self._episode_index)
+        }
+        self._video_paths = {
+            key: root / "videos" / key / "chunk-000" / "file-000.mp4" for key in AERO_HANDOFF_VIDEO_KEYS
+        }
+        missing = [str(path) for path in self._video_paths.values() if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"Missing A1 video files: {missing}")
+        self._captures = None
+        self._image_arrays = None
+        self._image_cache_paths = {
+            key: root / "openpi_cache" / f"{key.replace('.', '_')}_{IMAGE_CACHE_SIZE}.npy"
+            for key in AERO_HANDOFF_VIDEO_KEYS
+        }
+
+    @staticmethod
+    def _convert_actions(actions: np.ndarray, states: np.ndarray) -> np.ndarray:
+        if actions.shape[-1] == aero_handoff_policy.ACTION_DIM:
+            return actions.astype(np.float32)
+        if actions.shape[-1] != OLD_AERO_HANDOFF_CTRL_DIM:
+            raise ValueError(
+                f"Expected A1 action dim {aero_handoff_policy.ACTION_DIM} or legacy dim "
+                f"{OLD_AERO_HANDOFF_CTRL_DIM}, got {actions.shape[-1]}"
+            )
+        converted = np.empty((actions.shape[0], aero_handoff_policy.ACTION_DIM), dtype=np.float32)
+        policy_states = np.stack(
+            [aero_handoff_policy.a1_state_from_qpos(qpos) for qpos in states],
+            axis=0,
+        ).astype(np.float32)
+        converted[:, :6] = actions[:, 2:8] - policy_states[:, :6]
+        converted[:, 6] = actions[:, 8]
+        converted[:, 7:13] = actions[:, 9:15] - policy_states[:, 7:13]
+        converted[:, 13:] = policy_states[:, 13:]
+        return converted
+
+    def __len__(self) -> int:
+        return int(self._states.shape[0])
+
+    def _get_captures(self):
+        if self._captures is None:
+            import cv2
+
+            captures = {}
+            for key, path in self._video_paths.items():
+                cap = cv2.VideoCapture(str(path))
+                if not cap.isOpened():
+                    raise RuntimeError(f"Failed to open video {path}")
+                captures[key] = cap
+            self._captures = captures
+        return self._captures
+
+    def _get_image_arrays(self):
+        if self._image_arrays is None:
+            if all(path.is_file() for path in self._image_cache_paths.values()):
+                self._image_arrays = {
+                    key: np.load(path, mmap_mode="r") for key, path in self._image_cache_paths.items()
+                }
+            else:
+                self._image_arrays = {}
+        return self._image_arrays
+
+    def _read_image(self, key: str, index: int) -> np.ndarray:
+        image_arrays = self._get_image_arrays()
+        if key in image_arrays:
+            return np.asarray(image_arrays[key][index])
+
+        import cv2
+
+        cap = self._get_captures()[key]
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            raise RuntimeError(f"Failed to read {key} frame {index}")
+        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    def _action_chunk(self, index: int) -> np.ndarray:
+        ep = int(self._episode_index[index])
+        ep_indices = self._episode_to_indices[ep]
+        local = int(self._frame_index[index])
+        query_local = np.minimum(local + np.arange(self._action_horizon), len(ep_indices) - 1)
+        return self._actions[ep_indices[query_local]]
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        idx = int(index.__index__())
+        return {
+            "observation.state": self._states[idx],
+            "action": self._action_chunk(idx),
+            "observation.stage_index": np.asarray([self._stage_index[idx]], dtype=np.int64),
+            "observation.images.table_overview": self._read_image("observation.images.table_overview", idx),
+            "observation.images.gripper_forward": self._read_image("observation.images.gripper_forward", idx),
+            "observation.images.palm_inner": self._read_image("observation.images.palm_inner", idx),
+            "timestamp": np.asarray([self._timestamp[idx]], dtype=np.float32),
+            "frame_index": np.asarray([self._frame_index[idx]], dtype=np.int64),
+            "episode_index": np.asarray([self._episode_index[idx]], dtype=np.int64),
+            "index": np.asarray([self._index[idx]], dtype=np.int64),
+            "task_index": np.asarray([self._task_index[idx]], dtype=np.int64),
+            "prompt": AERO_HANDOFF_PROMPT,
+        }
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -136,6 +284,8 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
+    if repo_id == AERO_HANDOFF_REPO_ID:
+        return AeroHandoffDataset(AERO_HANDOFF_ROOT, action_horizon)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(

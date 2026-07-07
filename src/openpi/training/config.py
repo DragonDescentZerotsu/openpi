@@ -17,6 +17,7 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
+import openpi.policies.aero_handoff_policy as aero_handoff_policy
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
@@ -352,6 +353,38 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotAeroHandoffDataConfig(DataConfigFactory):
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "observation/images/table_overview": "observation.images.table_overview",
+                        "observation/images/gripper_forward": "observation.images.gripper_forward",
+                        "observation/images/palm_inner": "observation.images.palm_inner",
+                        "observation/state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[aero_handoff_policy.AeroHandoffInputs(model_type=model_config.model_type)],
+            outputs=[aero_handoff_policy.AeroHandoffOutputs()],
+        )
+        model_transforms = ModelTransformFactory()(model_config)
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action",),
         )
 
 
@@ -760,6 +793,28 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_a1_piper_pipette_handoff",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotAeroHandoffDataConfig(
+            repo_id="aero_quest/piper_pipette_handoff",
+        ),
+        batch_size=512,
+        num_workers=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=100_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=5_000,
+        log_interval=20,
+        save_interval=1000,
+        keep_period=1000,
     ),
     #
     # Fine-tuning Aloha configs.
