@@ -10,9 +10,9 @@ from openpi.models import model as _model
 ACTION_DIM = 20
 
 # A1 policy action/state schema:
-#   0:6   piper_original arm joint target deltas from current qpos
+#   0:6   piper_original arm next-target offsets from observed qpos
 #   6     piper_original gripper opening
-#   7:13  piper_aerohand arm joint target deltas from current qpos
+#   7:13  piper_aerohand arm next-target offsets from observed qpos
 #   13:20 semantic Aero Hand state/action in [0, 1]
 # The full exported qpos remains 40-D; pi0.5 pads this 20-D state/action to 32-D.
 ARM_DELTA_MASK = np.asarray([True] * 6 + [False] + [True] * 6 + [False] * 7, dtype=bool)

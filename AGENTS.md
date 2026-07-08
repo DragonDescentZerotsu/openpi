@@ -54,10 +54,16 @@ handoff config is `pi05_a1_piper_pipette_handoff`.
 The SO_AeroHand A1 handoff config uses a 20D policy action schema, not the raw
 MuJoCo `model.nu`: left original Piper arm joints 1-6, left original gripper,
 right Piper + Aero Hand arm joints 1-6, and 7 semantic Aero Hand channels.
-The 12 arm-joint entries are relative deltas from current qpos to the position
-actuator target. The gripper and Aero Hand semantic channels stay absolute.
-Passive pipette button/ejector actuators are part of the shared pipette MJCF but
-are excluded from A1 pi0.5 training.
+The 12 arm-joint entries are next-target offsets from observed qpos. The stored
+LeRobot frame action is
+`expert_ctrl[min(i + 1, T - 1)] - expert_qpos[i]` at the policy frame rate. When
+the A1 data loader returns an action chunk, it rebases every arm target in that
+chunk to the chunk-start observation state. The parent evaluator executes the
+chunk closed-loop as `ctrl = chunk_start_rollout_qpos + predicted_offset`,
+clipped to actuator range. Do not add or revive a hidden command accumulator for
+A1 eval. The gripper and Aero Hand semantic channels stay absolute targets from
+the same next target frame. Passive pipette button/ejector actuators are part of
+the shared pipette MJCF but are excluded from A1 pi0.5 training.
 
 Legacy 16D A1 parquet files may still be converted in `src/openpi/training/data_loader.py`,
 but new A1 data should already contain the corrected 20D schema. The project
@@ -96,26 +102,56 @@ On 8x A100, `--batch-size 512 --fsdp-devices 8` uses all 8 GPUs at about
 Orbax writes roughly `42GB` per saved step for params/train_state/assets, and
 finalization can take several minutes even after the training loop is done.
 
-The 2026-07-07 corrected A1 delta-arm run was:
+The obsolete 2026-07-07 A1 command-delta debug run was:
 
 ```text
-exp: a1_train50_eval20_delta_arm_b512_fsdp8_1k
-checkpoint: checkpoints/pi05_a1_piper_pipette_handoff/a1_train50_eval20_delta_arm_b512_fsdp8_1k/999
-wandb: https://wandb.ai/reasonv/openpi/runs/7ogsxm4p
-loss: 0.6380 -> 0.0097 over 1000 steps
+exp: a1_train50_eval20_cmd_delta_arm_b512_fsdp8_4k
+checkpoint root: checkpoints/pi05_a1_piper_pipette_handoff/a1_train50_eval20_cmd_delta_arm_b512_fsdp8_4k
+checkpoints: 999, step0999_preserved, 2000, 3000, 3999
+wandb: https://wandb.ai/reasonv/openpi/runs/2q5ykmz8
+loss: 0.6628 -> about 0.0082 over 4000 steps
 ```
 
-Closed-loop eval from the parent repo produced `0/20` success at:
+The 1000-step checkpoint was successfully resumed to 4000 steps, but this run
+used `ctrl_target[t] - ctrl_target[t-1]` labels plus a hidden command
+accumulator in eval. Treat it as an invalid action-semantics debug artifact, not
+as a corrected A1 baseline.
+
+Closed-loop eval from the parent repo produced:
 
 ```text
-/data1/tianang/Projects/SO_AeroHand/outputs/openpi_eval/a1_piper_pipette_handoff/pi05_delta_arm_b512_fsdp8_step999_eval20
+step0999 eval_id: 0/20
+step2000 eval_id: 0/20
+step3000 eval_id: 0/20
+step3999 eval_id: 0/20
+step3999 train:   0/5
 ```
 
-All eval failures had `hook=False` and `palm=False`; mean final hook target
-error was about `0.468m`. Treat this checkpoint as a corrected-action training
-smoke result, not a solved A1 baseline. For the next debugging pass, make the
-parent eval script save raw policy actions and applied MuJoCo ctrl in rollout
-NPZ files; the current rollouts save qpos/labels only.
+Artifacts are under:
+
+```text
+/data1/tianang/Projects/SO_AeroHand/outputs/openpi_eval/a1_piper_pipette_handoff
+```
+
+Treat these checkpoints as invalid action-semantics debug results, not solved A1
+baselines. The next valid A1 pi0.5 runs should use next-target-offset labels,
+fresh norm stats, and train-set rollout smoke tests before longer eval sweeps.
+
+The first corrected chunk-base delta run was:
+
+```text
+exp: a1_train50_eval20_chunk_base_delta_b512_fsdp8_1k
+checkpoint: checkpoints/pi05_a1_piper_pipette_handoff/a1_train50_eval20_chunk_base_delta_b512_fsdp8_1k/999
+wandb: https://wandb.ai/reasonv/openpi/runs/ydbl8oim
+loss: 0.6244 -> 0.0047 over 1000 steps
+train rollout: /data1/tianang/Projects/SO_AeroHand/outputs/openpi_eval/a1_piper_pipette_handoff/pi05_chunk_base_delta_b512_fsdp8_step0999_train_ep000000_replan5
+train success: 0/1
+```
+
+Do not extend that run to 4000 steps without further action-semantics work. The
+seen-train rollout fails because tiny nonzero arm-delta predictions during the
+initial hold window accumulate under current-qpos-relative execution; left-arm
+ctrl diverges before pregrasp, so the pipette never leaves the rack.
 
 Do not commit checkpoints, WandB logs, downloaded model assets, dataset caches,
 or generated training outputs from this directory.

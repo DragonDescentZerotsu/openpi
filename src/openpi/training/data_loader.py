@@ -166,8 +166,12 @@ class AeroHandoffDataset(Dataset):
             raise ValueError(f"Expected one A1 parquet file under {root / 'data'}, found {len(parquet_files)}")
         table = pd.read_parquet(parquet_files[0])
         self._states = np.stack(table["observation.state"].map(np.asarray).to_numpy()).astype(np.float32)
+        self._policy_states = np.stack(
+            [aero_handoff_policy.a1_state_from_qpos(qpos) for qpos in self._states],
+            axis=0,
+        ).astype(np.float32)
         raw_actions = np.stack(table["action"].map(np.asarray).to_numpy()).astype(np.float32)
-        self._actions = self._convert_actions(raw_actions, self._states)
+        self._actions = self._convert_actions(raw_actions, self._policy_states)
         self._stage_index = table["observation.stage_index"].to_numpy(dtype=np.int64)
         self._timestamp = table["timestamp"].to_numpy(dtype=np.float32)
         self._frame_index = table["frame_index"].to_numpy(dtype=np.int64)
@@ -191,7 +195,7 @@ class AeroHandoffDataset(Dataset):
         }
 
     @staticmethod
-    def _convert_actions(actions: np.ndarray, states: np.ndarray) -> np.ndarray:
+    def _convert_actions(actions: np.ndarray, policy_states: np.ndarray) -> np.ndarray:
         if actions.shape[-1] == aero_handoff_policy.ACTION_DIM:
             return actions.astype(np.float32)
         if actions.shape[-1] != OLD_AERO_HANDOFF_CTRL_DIM:
@@ -200,10 +204,6 @@ class AeroHandoffDataset(Dataset):
                 f"{OLD_AERO_HANDOFF_CTRL_DIM}, got {actions.shape[-1]}"
             )
         converted = np.empty((actions.shape[0], aero_handoff_policy.ACTION_DIM), dtype=np.float32)
-        policy_states = np.stack(
-            [aero_handoff_policy.a1_state_from_qpos(qpos) for qpos in states],
-            axis=0,
-        ).astype(np.float32)
         converted[:, :6] = actions[:, 2:8] - policy_states[:, :6]
         converted[:, 6] = actions[:, 8]
         converted[:, 7:13] = actions[:, 9:15] - policy_states[:, 7:13]
@@ -255,7 +255,15 @@ class AeroHandoffDataset(Dataset):
         ep_indices = self._episode_to_indices[ep]
         local = int(self._frame_index[index])
         query_local = np.minimum(local + np.arange(self._action_horizon), len(ep_indices) - 1)
-        return self._actions[ep_indices[query_local]]
+        query_indices = ep_indices[query_local]
+        chunk = self._actions[query_indices].copy()
+        mask = aero_handoff_policy.ARM_DELTA_MASK
+        # Stored A1 arm actions are per-frame next-target offsets
+        # (target[k+1] - state[k]). A pi0/pi0.5 action chunk expects every
+        # delta in the chunk to be relative to the observation state at the
+        # chunk start, so convert to target[k+1] - state[index] here.
+        chunk[:, mask] += self._policy_states[query_indices][:, mask] - self._policy_states[index][mask]
+        return chunk
 
     def __getitem__(self, index: SupportsIndex) -> dict:
         idx = int(index.__index__())
