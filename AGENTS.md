@@ -51,24 +51,64 @@ For pi0.5, use openpi's flow-matching head support. Useful built-in configs
 include `pi05_libero`, `pi05_droid`, and `debug_pi05`. The project-specific A1
 handoff config is `pi05_a1_piper_pipette_handoff`.
 
-The SO_AeroHand A1 handoff config uses a 20D policy action schema, not the raw
-MuJoCo `model.nu`: left original Piper arm joints 1-6, left original gripper,
-right Piper + Aero Hand arm joints 1-6, and 7 semantic Aero Hand channels.
-The 12 arm-joint entries are next-target offsets from observed qpos. The stored
-LeRobot frame action is
-`expert_ctrl[min(i + 1, T - 1)] - expert_qpos[i]` at the policy frame rate. When
-the A1 data loader returns an action chunk, it rebases every arm target in that
-chunk to the chunk-start observation state. The parent evaluator executes the
-chunk closed-loop as `ctrl = chunk_start_rollout_qpos + predicted_offset`,
-clipped to actuator range. Do not add or revive a hidden command accumulator for
-A1 eval. The gripper and Aero Hand semantic channels stay absolute targets from
-the same next target frame. Passive pipette button/ejector actuators are part of
-the shared pipette MJCF but are excluded from A1 pi0.5 training.
+The SO_AeroHand A1 handoff configs use a 20D robot-only policy state and 20D
+policy action schema, not full MuJoCo `qpos` or raw `model.nu`. There are two
+supported state modes over the same generated LeRobot parquet:
 
-Legacy 16D A1 parquet files may still be converted in `src/openpi/training/data_loader.py`,
-but new A1 data should already contain the corrected 20D schema. The project
-policy transform pads state/actions from 20D to pi0.5's 32D model action space;
-the padded tail must stay zero.
+- `pose`: left original Piper `link6` eef pose in the left robot base frame,
+  left original gripper opening, right Piper + Aero Hand `palm` pose in the
+  right robot base frame, and 7 semantic Aero Hand channels. Each pose is
+  position xyz + axis-angle xyz and must be reproducible in real deployment from
+  joint encoders, fixed robot model FK, and the robot's own base frame.
+- `joint`: left original Piper arm qpos 6D, left original gripper opening, right
+  Piper + Aero Hand arm qpos 6D, and 7 semantic Aero Hand channels. This mode is
+  rebuilt in the OpenPI loader from the dataset's `controller.arm_qpos` helper
+  plus gripper/hand fields, and intentionally has the same 20D ordering as the
+  action schema.
+
+Do not expose pipette freejoint pose, rack pose, pipette ejector/button/knob, or
+other direct object/environment state through `observation.state`; these remain
+raw-trajectory/debug fields only.
+The 20D action order is left arm 6D, left gripper 1D, right arm 6D, and Aero
+Hand 7D. The 12 arm entries are next-target offsets from controller measured
+arm qpos. The stored LeRobot frame action is
+`policy_ctrl[min(i + 1, T - 1)] - expert_qpos[i]` at the policy frame rate. In
+perturbed raw traces, `ctrl` is the noisy command that generated the state
+trajectory and `policy_ctrl` is the expert/recovery target used as the label;
+legacy clean raw without `policy_ctrl` falls back to `ctrl`. The
+dataset also contains a 12D `controller.arm_qpos` field used only by the OpenPI
+A1 data loader to rebase action chunks to the chunk-start controller qpos; it is
+not passed to the model. The parent evaluator executes the chunk closed-loop as
+`ctrl = chunk_start_rollout_qpos + predicted_offset`, clipped to actuator range.
+Do not add or revive a hidden command accumulator for A1 eval. The gripper and
+Aero Hand semantic channels stay absolute targets from the same next target
+frame. Passive pipette button/ejector actuators are part of the shared pipette
+MJCF but are excluded from A1 pi0.5 training.
+
+The A1 data loader is intentionally strict: source LeRobot `observation.state`
+must be 20D robot-only pose proprioception, `controller.arm_qpos` must be 12D
+arm encoder qpos for chunk rebasing and optional joint-state reconstruction, and
+`action` must be the 20D A1 task action. Do not add compatibility conversion for
+old full-qpos, 40D, or pre-20D parquet exports. Pose-state and joint-state
+checkpoints/norm stats are not compatible even though the tensor shape is still
+20D. The project policy transform pads state/actions from 20D to pi0.5's 32D
+model action space; the padded tail must stay zero.
+
+The local A1 reader supports both the historical single-file export and
+no-concat aggregate datasets with multiple parquet/video shards. It concatenates
+sorted data parquet files, requires contiguous episode/frame indices, and uses
+`meta/episodes` video `chunk_index`, `file_index`, and `from_timestamp` fields to
+resolve each frame. Do not restore hard-coded `file-000` video paths.
+
+Use these A1 pi0.5 configs:
+
+- `pi05_a1_piper_pipette_handoff` and
+  `pi05_a1_piper_pipette_handoff_pose_state`: current pose-state version,
+  `discrete_state_input=False`, matching the running pose-observation ablation.
+- `pi05_a1_piper_pipette_handoff_joint_state_discrete`: joint-state version,
+  `discrete_state_input=True`, so normalized 20D state is discretized into the
+  pi0.5 prompt token stream. Compute separate norm stats for this config before
+  training; it uses asset id `aero_quest/piper_pipette_handoff_joint_state`.
 
 Typical entry points are:
 
@@ -101,6 +141,12 @@ On 8x A100, `--batch-size 512 --fsdp-devices 8` uses all 8 GPUs at about
 `64.8GB` per GPU for this full pi0.5 fine-tune. Avoid frequent checkpoints:
 Orbax writes roughly `42GB` per saved step for params/train_state/assets, and
 finalization can take several minutes even after the training loop is done.
+
+The current `pi05_a1_piper_pipette_handoff` learning-rate schedule is a
+global-step schedule: linearly warm up for 500 optimizer steps from
+`1e-4 / 501` to `1e-4`, hold `1e-4` through step 2999, then switch to and hold
+`5e-5` from step 3000 onward. The previous A1 setting warmed up for 500 steps
+to constant `5e-5`.
 
 The obsolete 2026-07-07 A1 command-delta debug run was:
 

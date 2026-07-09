@@ -90,6 +90,9 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # Optional low-dimensional observation variant for custom datasets that expose
+    # multiple robot-only state schemas over the same episodes.
+    state_mode: str | None = None
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -358,6 +361,11 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotAeroHandoffDataConfig(DataConfigFactory):
+    state_mode: str = aero_handoff_policy.STATE_MODE_POSE
+
+    def __post_init__(self):
+        aero_handoff_policy.validate_state_mode(self.state_mode)
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -385,6 +393,7 @@ class LeRobotAeroHandoffDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
             action_sequence_keys=("action",),
+            state_mode=self.state_mode,
         )
 
 
@@ -799,14 +808,62 @@ _CONFIGS = [
         model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
         data=LeRobotAeroHandoffDataConfig(
             repo_id="aero_quest/piper_pipette_handoff",
+            state_mode=aero_handoff_policy.STATE_MODE_POSE,
         ),
         batch_size=512,
         num_workers=16,
-        lr_schedule=_optimizer.CosineDecaySchedule(
+        lr_schedule=_optimizer.WarmupThenStepSchedule(
             warmup_steps=500,
-            peak_lr=5e-5,
-            decay_steps=100_000,
-            decay_lr=5e-5,
+            peak_lr=1e-4,
+            drop_step=3_000,
+            final_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=5_000,
+        log_interval=20,
+        save_interval=1000,
+        keep_period=1000,
+    ),
+    TrainConfig(
+        name="pi05_a1_piper_pipette_handoff_pose_state",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotAeroHandoffDataConfig(
+            repo_id="aero_quest/piper_pipette_handoff",
+            state_mode=aero_handoff_policy.STATE_MODE_POSE,
+        ),
+        batch_size=512,
+        num_workers=16,
+        lr_schedule=_optimizer.WarmupThenStepSchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            drop_step=3_000,
+            final_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=5_000,
+        log_interval=20,
+        save_interval=1000,
+        keep_period=1000,
+    ),
+    TrainConfig(
+        name="pi05_a1_piper_pipette_handoff_joint_state_discrete",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=True),
+        data=LeRobotAeroHandoffDataConfig(
+            repo_id="aero_quest/piper_pipette_handoff",
+            assets=AssetsConfig(asset_id="aero_quest/piper_pipette_handoff_joint_state"),
+            state_mode=aero_handoff_policy.STATE_MODE_JOINT,
+        ),
+        batch_size=512,
+        num_workers=16,
+        lr_schedule=_optimizer.WarmupThenStepSchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            drop_step=3_000,
+            final_lr=5e-5,
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,

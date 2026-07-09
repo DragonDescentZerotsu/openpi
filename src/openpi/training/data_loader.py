@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
@@ -36,7 +37,6 @@ AERO_HANDOFF_VIDEO_KEYS = (
     "observation.images.palm_inner",
 )
 IMAGE_CACHE_SIZE = 224
-OLD_AERO_HANDOFF_CTRL_DIM = 16
 
 
 class Dataset(Protocol[T_co]):
@@ -156,75 +156,155 @@ class AeroHandoffDataset(Dataset):
     expected by openpi transforms.
     """
 
-    def __init__(self, root: pathlib.Path, action_horizon: int):
+    def __init__(
+        self,
+        root: pathlib.Path,
+        action_horizon: int,
+        *,
+        state_mode: str = aero_handoff_policy.STATE_MODE_POSE,
+    ):
         import pandas as pd
 
         self._root = root
         self._action_horizon = action_horizon
+        self._state_mode = aero_handoff_policy.validate_state_mode(state_mode)
         parquet_files = sorted((root / "data").glob("**/*.parquet"))
-        if len(parquet_files) != 1:
-            raise ValueError(f"Expected one A1 parquet file under {root / 'data'}, found {len(parquet_files)}")
-        table = pd.read_parquet(parquet_files[0])
-        self._states = np.stack(table["observation.state"].map(np.asarray).to_numpy()).astype(np.float32)
-        self._policy_states = np.stack(
-            [aero_handoff_policy.a1_state_from_qpos(qpos) for qpos in self._states],
-            axis=0,
-        ).astype(np.float32)
+        if not parquet_files:
+            raise ValueError(f"No A1 parquet files found under {root / 'data'}")
+        data_columns = [
+            "observation.state",
+            "action",
+            "controller.arm_qpos",
+            "observation.stage_index",
+            "timestamp",
+            "frame_index",
+            "episode_index",
+            "index",
+            "task_index",
+        ]
+        table = pd.concat(
+            [pd.read_parquet(path, columns=data_columns) for path in parquet_files],
+            ignore_index=True,
+        )
+        source_policy_states = np.stack(table["observation.state"].map(np.asarray).to_numpy()).astype(np.float32)
+        if source_policy_states.ndim != 2 or source_policy_states.shape[1] != aero_handoff_policy.STATE_DIM:
+            raise ValueError(
+                f"Expected A1 source observation.state width {aero_handoff_policy.STATE_DIM}, "
+                f"got {source_policy_states.shape}"
+            )
         raw_actions = np.stack(table["action"].map(np.asarray).to_numpy()).astype(np.float32)
-        self._actions = self._convert_actions(raw_actions, self._policy_states)
+        if raw_actions.ndim != 2 or raw_actions.shape[1] != aero_handoff_policy.ACTION_DIM:
+            raise ValueError(f"Expected A1 action width {aero_handoff_policy.ACTION_DIM}, got {raw_actions.shape}")
+        self._actions = raw_actions
+        if "controller.arm_qpos" not in table.columns:
+            raise ValueError("A1 pose-state datasets must include controller.arm_qpos for action chunk rebasing")
+        self._controller_arm_qpos = np.stack(table["controller.arm_qpos"].map(np.asarray).to_numpy()).astype(np.float32)
+        expected_controller_dim = int(aero_handoff_policy.ARM_DELTA_MASK.sum())
+        if self._controller_arm_qpos.ndim != 2 or self._controller_arm_qpos.shape[1] != expected_controller_dim:
+            raise ValueError(
+                f"Expected A1 controller.arm_qpos width {expected_controller_dim}, "
+                f"got {self._controller_arm_qpos.shape}"
+            )
+        if self._state_mode == aero_handoff_policy.STATE_MODE_POSE:
+            self._policy_states = source_policy_states
+        else:
+            self._policy_states = np.concatenate(
+                [
+                    self._controller_arm_qpos[:, :6],
+                    source_policy_states[:, 6:7],
+                    self._controller_arm_qpos[:, 6:12],
+                    source_policy_states[:, 13:20],
+                ],
+                axis=1,
+            ).astype(np.float32)
+        if self._policy_states.shape != source_policy_states.shape:
+            raise ValueError(f"Bad A1 {self._state_mode} state shape {self._policy_states.shape}")
         self._stage_index = table["observation.stage_index"].to_numpy(dtype=np.int64)
         self._timestamp = table["timestamp"].to_numpy(dtype=np.float32)
         self._frame_index = table["frame_index"].to_numpy(dtype=np.int64)
         self._episode_index = table["episode_index"].to_numpy(dtype=np.int64)
         self._index = table["index"].to_numpy(dtype=np.int64)
         self._task_index = table["task_index"].to_numpy(dtype=np.int64)
-        self._episode_to_indices: dict[int, np.ndarray] = {
-            int(ep): np.flatnonzero(self._episode_index == ep) for ep in np.unique(self._episode_index)
-        }
-        self._video_paths = {
-            key: root / "videos" / key / "chunk-000" / "file-000.mp4" for key in AERO_HANDOFF_VIDEO_KEYS
-        }
-        missing = [str(path) for path in self._video_paths.values() if not path.is_file()]
+        episode_starts = np.flatnonzero(np.r_[True, self._episode_index[1:] != self._episode_index[:-1]])
+        episode_ends = np.r_[episode_starts[1:], len(self._episode_index)]
+        self._episode_bounds: dict[int, tuple[int, int]] = {}
+        for start, end in zip(episode_starts, episode_ends, strict=True):
+            episode_index = int(self._episode_index[start])
+            if episode_index in self._episode_bounds:
+                raise ValueError(f"A1 episode {episode_index} is not contiguous in the data parquet files")
+            expected_frames = np.arange(end - start, dtype=np.int64)
+            if not np.array_equal(self._frame_index[start:end], expected_frames):
+                raise ValueError(f"A1 episode {episode_index} has non-contiguous frame_index values")
+            self._episode_bounds[episode_index] = (int(start), int(end))
+        info = json.loads((root / "meta" / "info.json").read_text(encoding="utf-8"))
+        self._fps = int(info["fps"])
+        episode_meta_files = sorted((root / "meta" / "episodes").glob("**/*.parquet"))
+        if not episode_meta_files:
+            raise ValueError(f"No A1 episode metadata found under {root / 'meta' / 'episodes'}")
+        episode_meta_columns = ["episode_index"]
+        for key in AERO_HANDOFF_VIDEO_KEYS:
+            prefix = f"videos/{key}"
+            episode_meta_columns.extend(
+                [
+                    f"{prefix}/chunk_index",
+                    f"{prefix}/file_index",
+                    f"{prefix}/from_timestamp",
+                ]
+            )
+        episode_meta = pd.concat(
+            [pd.read_parquet(path, columns=episode_meta_columns) for path in episode_meta_files],
+            ignore_index=True,
+        )
+        self._episode_video_refs: dict[str, dict[int, tuple[pathlib.Path, int]]] = {}
+        for key in AERO_HANDOFF_VIDEO_KEYS:
+            prefix = f"videos/{key}"
+            required = (
+                "episode_index",
+                f"{prefix}/chunk_index",
+                f"{prefix}/file_index",
+                f"{prefix}/from_timestamp",
+            )
+            missing_columns = [column for column in required if column not in episode_meta.columns]
+            if missing_columns:
+                raise ValueError(f"Missing A1 episode video metadata columns: {missing_columns}")
+            refs: dict[int, tuple[pathlib.Path, int]] = {}
+            for row in episode_meta.loc[:, list(required)].itertuples(index=False, name=None):
+                episode_index, chunk_index, file_index, from_timestamp = row
+                path = root / "videos" / key / f"chunk-{int(chunk_index):03d}" / f"file-{int(file_index):03d}.mp4"
+                refs[int(episode_index)] = (
+                    path,
+                    round(float(from_timestamp) * self._fps),
+                )
+            self._episode_video_refs[key] = refs
+        missing = sorted(
+            {
+                str(path)
+                for refs in self._episode_video_refs.values()
+                for path, _start_frame in refs.values()
+                if not path.is_file()
+            }
+        )
         if missing:
             raise FileNotFoundError(f"Missing A1 video files: {missing}")
-        self._captures = None
+        self._captures: dict[pathlib.Path, object] = {}
         self._image_arrays = None
         self._image_cache_paths = {
             key: root / "openpi_cache" / f"{key.replace('.', '_')}_{IMAGE_CACHE_SIZE}.npy"
             for key in AERO_HANDOFF_VIDEO_KEYS
         }
 
-    @staticmethod
-    def _convert_actions(actions: np.ndarray, policy_states: np.ndarray) -> np.ndarray:
-        if actions.shape[-1] == aero_handoff_policy.ACTION_DIM:
-            return actions.astype(np.float32)
-        if actions.shape[-1] != OLD_AERO_HANDOFF_CTRL_DIM:
-            raise ValueError(
-                f"Expected A1 action dim {aero_handoff_policy.ACTION_DIM} or legacy dim "
-                f"{OLD_AERO_HANDOFF_CTRL_DIM}, got {actions.shape[-1]}"
-            )
-        converted = np.empty((actions.shape[0], aero_handoff_policy.ACTION_DIM), dtype=np.float32)
-        converted[:, :6] = actions[:, 2:8] - policy_states[:, :6]
-        converted[:, 6] = actions[:, 8]
-        converted[:, 7:13] = actions[:, 9:15] - policy_states[:, 7:13]
-        converted[:, 13:] = policy_states[:, 13:]
-        return converted
-
     def __len__(self) -> int:
-        return int(self._states.shape[0])
+        return int(self._policy_states.shape[0])
 
-    def _get_captures(self):
-        if self._captures is None:
+    def _get_capture(self, path: pathlib.Path):
+        if path not in self._captures:
             import cv2
 
-            captures = {}
-            for key, path in self._video_paths.items():
-                cap = cv2.VideoCapture(str(path))
-                if not cap.isOpened():
-                    raise RuntimeError(f"Failed to open video {path}")
-                captures[key] = cap
-            self._captures = captures
-        return self._captures
+            cap = cv2.VideoCapture(str(path))
+            if not cap.isOpened():
+                raise RuntimeError(f"Failed to open video {path}")
+            self._captures[path] = cap
+        return self._captures[path]
 
     def _get_image_arrays(self):
         if self._image_arrays is None:
@@ -243,32 +323,42 @@ class AeroHandoffDataset(Dataset):
 
         import cv2
 
-        cap = self._get_captures()[key]
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(index))
+        episode_index = int(self._episode_index[index])
+        try:
+            path, episode_start_frame = self._episode_video_refs[key][episode_index]
+        except KeyError as exc:
+            raise RuntimeError(f"Missing video metadata for {key} episode {episode_index}") from exc
+        video_frame = episode_start_frame + int(self._frame_index[index])
+        cap = self._get_capture(path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, video_frame)
         ok, frame = cap.read()
         if not ok or frame is None:
-            raise RuntimeError(f"Failed to read {key} frame {index}")
+            raise RuntimeError(f"Failed to read {key} dataset frame {index} from {path} frame {video_frame}")
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     def _action_chunk(self, index: int) -> np.ndarray:
         ep = int(self._episode_index[index])
-        ep_indices = self._episode_to_indices[ep]
+        episode_start, episode_end = self._episode_bounds[ep]
         local = int(self._frame_index[index])
-        query_local = np.minimum(local + np.arange(self._action_horizon), len(ep_indices) - 1)
-        query_indices = ep_indices[query_local]
+        query_local = np.minimum(
+            local + np.arange(self._action_horizon),
+            episode_end - episode_start - 1,
+        )
+        query_indices = episode_start + query_local
         chunk = self._actions[query_indices].copy()
         mask = aero_handoff_policy.ARM_DELTA_MASK
         # Stored A1 arm actions are per-frame next-target offsets
-        # (target[k+1] - state[k]). A pi0/pi0.5 action chunk expects every
-        # delta in the chunk to be relative to the observation state at the
-        # chunk start, so convert to target[k+1] - state[index] here.
-        chunk[:, mask] += self._policy_states[query_indices][:, mask] - self._policy_states[index][mask]
+        # (target[k+1] - qpos[k]). A pi0/pi0.5 action chunk expects every arm
+        # delta in the chunk to be relative to the controller qpos at the chunk
+        # start, so convert to target[k+1] - qpos[index] here. The policy state
+        # itself is FK pose features and is never used for this rebasing.
+        chunk[:, mask] += self._controller_arm_qpos[query_indices] - self._controller_arm_qpos[index]
         return chunk
 
     def __getitem__(self, index: SupportsIndex) -> dict:
         idx = int(index.__index__())
         return {
-            "observation.state": self._states[idx],
+            "observation.state": self._policy_states[idx],
             "action": self._action_chunk(idx),
             "observation.stage_index": np.asarray([self._stage_index[idx]], dtype=np.int64),
             "observation.images.table_overview": self._read_image("observation.images.table_overview", idx),
@@ -293,7 +383,11 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
     if repo_id == AERO_HANDOFF_REPO_ID:
-        return AeroHandoffDataset(AERO_HANDOFF_ROOT, action_horizon)
+        return AeroHandoffDataset(
+            AERO_HANDOFF_ROOT,
+            action_horizon,
+            state_mode=data_config.state_mode or aero_handoff_policy.STATE_MODE_POSE,
+        )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(

@@ -53,6 +53,32 @@ class RsqrtDecaySchedule(LRScheduleConfig):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class WarmupThenStepSchedule(LRScheduleConfig):
+    """Linear warmup, hold the peak LR, then step down to a lower LR."""
+
+    warmup_steps: int = 500
+    peak_lr: float = 1e-4
+    drop_step: int = 3_000
+    final_lr: float = 5e-5
+
+    def create(self) -> optax.Schedule:
+        if self.drop_step < self.warmup_steps:
+            raise ValueError("drop_step must be greater than or equal to warmup_steps")
+        return optax.join_schedules(
+            [
+                optax.linear_schedule(
+                    init_value=self.peak_lr / (self.warmup_steps + 1),
+                    end_value=self.peak_lr,
+                    transition_steps=self.warmup_steps,
+                ),
+                optax.constant_schedule(self.peak_lr),
+                optax.constant_schedule(self.final_lr),
+            ],
+            [self.warmup_steps, self.drop_step],
+        )
+
+
 @runtime_checkable
 class OptimizerConfig(Protocol):
     def create(

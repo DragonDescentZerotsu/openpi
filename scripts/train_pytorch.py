@@ -449,10 +449,9 @@ def train_loop(config: _config.TrainConfig):
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
     # Optimizer + learning rate schedule from config
-    warmup_steps = config.lr_schedule.warmup_steps
-    peak_lr = config.lr_schedule.peak_lr
-    decay_steps = config.lr_schedule.decay_steps
-    end_lr = config.lr_schedule.decay_lr
+    lr_schedule_config = config.lr_schedule
+    warmup_steps = lr_schedule_config.warmup_steps
+    peak_lr = lr_schedule_config.peak_lr
 
     # Create optimizer with config parameters
     optim = torch.optim.AdamW(
@@ -469,15 +468,39 @@ def train_loop(config: _config.TrainConfig):
         global_step = load_checkpoint(model, optim, config.checkpoint_dir, device)
         logging.info(f"Resumed training from step {global_step}")
 
-    def lr_schedule(step: int):
-        if step < warmup_steps:
-            # Match JAX behavior: start from peak_lr / (warmup_steps + 1)
-            init_lr = peak_lr / (warmup_steps + 1)
-            return init_lr + (peak_lr - init_lr) * step / warmup_steps
-        # cosine decay
-        progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
-        cos = 0.5 * (1 + np.cos(np.pi * progress))
-        return end_lr + (peak_lr - end_lr) * cos
+    if hasattr(lr_schedule_config, "drop_step") and hasattr(lr_schedule_config, "final_lr"):
+        drop_step = lr_schedule_config.drop_step
+        final_lr = lr_schedule_config.final_lr
+
+        def lr_schedule(step: int):
+            if warmup_steps > 0 and step < warmup_steps:
+                # Match JAX behavior: start from peak_lr / (warmup_steps + 1)
+                init_lr = peak_lr / (warmup_steps + 1)
+                return init_lr + (peak_lr - init_lr) * step / warmup_steps
+            if step < drop_step:
+                return peak_lr
+            return final_lr
+
+        lr_schedule_desc = (
+            f"warmup={warmup_steps}, peak_lr={peak_lr:.2e}, drop_step={drop_step}, final_lr={final_lr:.2e}"
+        )
+    else:
+        decay_steps = lr_schedule_config.decay_steps
+        end_lr = lr_schedule_config.decay_lr
+
+        def lr_schedule(step: int):
+            if warmup_steps > 0 and step < warmup_steps:
+                # Match JAX behavior: start from peak_lr / (warmup_steps + 1)
+                init_lr = peak_lr / (warmup_steps + 1)
+                return init_lr + (peak_lr - init_lr) * step / warmup_steps
+            # cosine decay
+            progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
+            cos = 0.5 * (1 + np.cos(np.pi * progress))
+            return end_lr + (peak_lr - end_lr) * cos
+
+        lr_schedule_desc = (
+            f"warmup={warmup_steps}, peak_lr={peak_lr:.2e}, decay_steps={decay_steps}, end_lr={end_lr:.2e}"
+        )
 
     model.train()
     start_time = time.time()
@@ -490,9 +513,7 @@ def train_loop(config: _config.TrainConfig):
             f"Training config: batch_size={config.batch_size}, effective_batch_size={effective_batch_size}, num_train_steps={config.num_train_steps}"
         )
         logging.info(f"Memory optimizations: gradient_checkpointing={enable_gradient_checkpointing}")
-        logging.info(
-            f"LR schedule: warmup={warmup_steps}, peak_lr={peak_lr:.2e}, decay_steps={decay_steps}, end_lr={end_lr:.2e}"
-        )
+        logging.info(f"LR schedule: {lr_schedule_desc}")
         logging.info(
             f"Optimizer: {type(config.optimizer).__name__}, weight_decay={config.optimizer.weight_decay}, clip_norm={config.optimizer.clip_gradient_norm}"
         )
