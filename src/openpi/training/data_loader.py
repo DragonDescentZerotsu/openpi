@@ -23,10 +23,14 @@ T_co = TypeVar("T_co", covariant=True)
 
 
 AERO_HANDOFF_REPO_ID = "aero_quest/piper_pipette_handoff"
-AERO_HANDOFF_ROOT = pathlib.Path(
-    "/data1/tianang/Projects/SO_AeroHand/outputs/lerobot/piper_pipette_handoff/"
-    "a1_libero_like_train50_eval20_320x320_30fps"
-)
+AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID = "aero_quest/piper_pipette_handoff_white_noise_1k"
+SO_AEROHAND_ROOT = pathlib.Path(__file__).resolve().parents[5]
+AERO_HANDOFF_ROOTS = {
+    AERO_HANDOFF_REPO_ID: SO_AEROHAND_ROOT
+    / "outputs/lerobot/piper_pipette_handoff/a1_libero_like_train50_eval20_320x320_30fps",
+    AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID: SO_AEROHAND_ROOT / "outputs/lerobot/piper_pipette_handoff/"
+    "a1_white_noise_train1000_250clean_750perturbed_320x320_30fps_v1",
+}
 AERO_HANDOFF_PROMPT = (
     "Use the original Piper gripper to pick a pipette from the rack, hand it to the Aero Hand palm, "
     "and close four non-thumb fingers to hold the pipette."
@@ -162,12 +166,14 @@ class AeroHandoffDataset(Dataset):
         action_horizon: int,
         *,
         state_mode: str = aero_handoff_policy.STATE_MODE_POSE,
+        load_images: bool = True,
     ):
         import pandas as pd
 
         self._root = root
         self._action_horizon = action_horizon
         self._state_mode = aero_handoff_policy.validate_state_mode(state_mode)
+        self._load_images = bool(load_images)
         parquet_files = sorted((root / "data").glob("**/*.parquet"))
         if not parquet_files:
             raise ValueError(f"No A1 parquet files found under {root / 'data'}")
@@ -317,6 +323,8 @@ class AeroHandoffDataset(Dataset):
         return self._image_arrays
 
     def _read_image(self, key: str, index: int) -> np.ndarray:
+        if not self._load_images:
+            return np.zeros((1, 1, 3), dtype=np.uint8)
         image_arrays = self._get_image_arrays()
         if key in image_arrays:
             return np.asarray(image_arrays[key][index])
@@ -374,7 +382,11 @@ class AeroHandoffDataset(Dataset):
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    load_images: bool = True,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -382,11 +394,12 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
-    if repo_id == AERO_HANDOFF_REPO_ID:
+    if repo_id in AERO_HANDOFF_ROOTS:
         return AeroHandoffDataset(
-            AERO_HANDOFF_ROOT,
+            AERO_HANDOFF_ROOTS[repo_id],
             action_horizon,
             state_mode=data_config.state_mode or aero_handoff_policy.STATE_MODE_POSE,
+            load_images=load_images,
         )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)

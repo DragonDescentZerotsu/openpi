@@ -67,6 +67,10 @@ def test_aero_handoff_dataset_supports_multiple_data_and_video_shards(tmp_path: 
         assert dataset._episode_video_refs[key][1][1] == 15  # noqa: SLF001
     assert dataset._action_chunk(0).shape == (3, 20)  # noqa: SLF001
 
+    stats_dataset = _data_loader.AeroHandoffDataset(tmp_path, action_horizon=3, load_images=False)
+    for key in _data_loader.AERO_HANDOFF_VIDEO_KEYS:
+        assert stats_dataset._read_image(key, 0).shape == (1, 1, 3)  # noqa: SLF001
+
 
 def test_torch_data_loader():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)

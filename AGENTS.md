@@ -148,6 +148,33 @@ global-step schedule: linearly warm up for 500 optimizer steps from
 `5e-5` from step 3000 onward. The previous A1 setting warmed up for 500 steps
 to constant `5e-5`.
 
+The 1000-episode clean/recovery run uses the separate config
+`pi05_a1_piper_pipette_handoff_white_noise_1k_10k`. It is pinned to local repo
+id `aero_quest/piper_pipette_handoff_white_noise_1k`, dataset
+`a1_white_noise_train1000_250clean_750perturbed_320x320_30fps_v1`, and asset id
+`aero_quest/piper_pipette_handoff_white_noise_1k_pose_state`; do not point the
+historical 50-demo config at this dataset. Its schedule is warmup steps 0-499,
+`1e-4` through step 2999, `5e-5` for steps 3000-5999, and `2e-5` from step 6000
+through the 10k end. Global batch size is 512, so 10,000 steps over 1,141,373
+frames is `5,120,000 / 1,141,373 = 4.485825405` frame-level epochs. With
+`save_interval=5000`, JAX writes checkpoint 5000 and the final checkpoint 9999.
+
+Compute this config's independent norm stats without video decoding or spawned
+dataset copies:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n openpi_pi05 \
+  python scripts/compute_norm_stats.py \
+    --config-name pi05_a1_piper_pipette_handoff_white_noise_1k_10k \
+    --num-workers 0
+```
+
+The output is under
+`assets/pi05_a1_piper_pipette_handoff_white_noise_1k_10k/aero_quest/piper_pipette_handoff_white_noise_1k_pose_state/`.
+`compute_norm_stats.py` deliberately passes `load_images=False`; state/action
+stats do not depend on camera pixels, and decoding three videos per frame would
+only waste time.
+
 The obsolete 2026-07-07 A1 command-delta debug run was:
 
 ```text

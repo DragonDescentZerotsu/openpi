@@ -55,28 +55,36 @@ class RsqrtDecaySchedule(LRScheduleConfig):
 
 @dataclasses.dataclass(frozen=True)
 class WarmupThenStepSchedule(LRScheduleConfig):
-    """Linear warmup, hold the peak LR, then step down to a lower LR."""
+    """Linear warmup followed by one or two constant learning-rate drops."""
 
     warmup_steps: int = 500
     peak_lr: float = 1e-4
     drop_step: int = 3_000
     final_lr: float = 5e-5
+    second_drop_step: int | None = None
+    second_final_lr: float | None = None
 
     def create(self) -> optax.Schedule:
         if self.drop_step < self.warmup_steps:
             raise ValueError("drop_step must be greater than or equal to warmup_steps")
-        return optax.join_schedules(
-            [
-                optax.linear_schedule(
-                    init_value=self.peak_lr / (self.warmup_steps + 1),
-                    end_value=self.peak_lr,
-                    transition_steps=self.warmup_steps,
-                ),
-                optax.constant_schedule(self.peak_lr),
-                optax.constant_schedule(self.final_lr),
-            ],
-            [self.warmup_steps, self.drop_step],
-        )
+        if (self.second_drop_step is None) != (self.second_final_lr is None):
+            raise ValueError("second_drop_step and second_final_lr must be set together")
+        schedules = [
+            optax.linear_schedule(
+                init_value=self.peak_lr / (self.warmup_steps + 1),
+                end_value=self.peak_lr,
+                transition_steps=self.warmup_steps,
+            ),
+            optax.constant_schedule(self.peak_lr),
+            optax.constant_schedule(self.final_lr),
+        ]
+        boundaries = [self.warmup_steps, self.drop_step]
+        if self.second_drop_step is not None:
+            if self.second_drop_step < self.drop_step:
+                raise ValueError("second_drop_step must be greater than or equal to drop_step")
+            schedules.append(optax.constant_schedule(self.second_final_lr))
+            boundaries.append(self.second_drop_step)
+        return optax.join_schedules(schedules, boundaries)
 
 
 @runtime_checkable

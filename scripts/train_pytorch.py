@@ -471,6 +471,8 @@ def train_loop(config: _config.TrainConfig):
     if hasattr(lr_schedule_config, "drop_step") and hasattr(lr_schedule_config, "final_lr"):
         drop_step = lr_schedule_config.drop_step
         final_lr = lr_schedule_config.final_lr
+        second_drop_step = getattr(lr_schedule_config, "second_drop_step", None)
+        second_final_lr = getattr(lr_schedule_config, "second_final_lr", None)
 
         def lr_schedule(step: int):
             if warmup_steps > 0 and step < warmup_steps:
@@ -479,11 +481,15 @@ def train_loop(config: _config.TrainConfig):
                 return init_lr + (peak_lr - init_lr) * step / warmup_steps
             if step < drop_step:
                 return peak_lr
+            if second_drop_step is not None and step >= second_drop_step:
+                return second_final_lr
             return final_lr
 
         lr_schedule_desc = (
             f"warmup={warmup_steps}, peak_lr={peak_lr:.2e}, drop_step={drop_step}, final_lr={final_lr:.2e}"
         )
+        if second_drop_step is not None:
+            lr_schedule_desc += f", second_drop_step={second_drop_step}, second_final_lr={second_final_lr:.2e}"
     else:
         decay_steps = lr_schedule_config.decay_steps
         end_lr = lr_schedule_config.decay_lr
