@@ -51,6 +51,32 @@ For pi0.5, use openpi's flow-matching head support. Useful built-in configs
 include `pi05_libero`, `pi05_droid`, and `debug_pi05`. The project-specific A1
 handoff config is `pi05_a1_piper_pipette_handoff`.
 
+Important pi0.5 state-input invariant: `Pi0Config(pi05=True,
+discrete_state_input=False)` does **not** use the numerical values in
+`observation.state`. `TokenizePrompt` omits state when
+`discrete_state_input=False`, while the continuous `state_proj` suffix token is
+only constructed and used by pi0 (`pi05=False`). The state tensor is still
+loaded, normalized, padded, and carried in `Observation`; pi0.5 inference also
+reads `observation.state.shape[0]` for the batch size, but changing the state
+values cannot affect the training loss or predicted actions. The relevant
+implementation paths are `src/openpi/transforms.py` in
+`TokenizePrompt.__call__` and `src/openpi/models/pi0.py` in `Pi0.__init__`,
+`embed_prefix`, and `embed_suffix`; check both paths when changing this behavior.
+Therefore:
+
+- `pi05=True, discrete_state_input=False` is an image + prompt (vision-only
+  with respect to proprioception) ablation, not a continuous-state model.
+- Setting `state_mode=pose` or `state_mode=joint`, computing state norm stats,
+  or including `observation.state` in parquet does not make this configuration
+  state-conditioned.
+- To make pi0.5 consume robot state, use `discrete_state_input=True`; normalized
+  state is then discretized into the prompt token stream. Use norm stats whose
+  state schema matches the selected `state_mode`.
+- Do not name new `discrete_state_input=False` pi0.5 experiments `pose_state`,
+  `joint_state`, or `state20`. Use an explicit name such as `vision_only` or
+  `image_prompt_ablation`. Historical config/run names may remain for artifact
+  compatibility, but their documentation must identify them as state-blind.
+
 The SO_AeroHand A1 handoff configs use a 20D robot-only policy state and 20D
 policy action schema, not full MuJoCo `qpos` or raw `model.nu`. There are two
 supported state modes over the same generated LeRobot parquet:
@@ -103,8 +129,10 @@ resolve each frame. Do not restore hard-coded `file-000` video paths.
 Use these A1 pi0.5 configs:
 
 - `pi05_a1_piper_pipette_handoff` and
-  `pi05_a1_piper_pipette_handoff_pose_state`: current pose-state version,
-  `discrete_state_input=False`, matching the running pose-observation ablation.
+  `pi05_a1_piper_pipette_handoff_pose_state`: historical image + prompt
+  ablation with `discrete_state_input=False`. Despite the second config's
+  legacy `pose_state` name and its 20D pose state data pipeline, the pi0.5 model
+  does not consume those state values.
 - `pi05_a1_piper_pipette_handoff_joint_state_discrete`: joint-state version,
   `discrete_state_input=True`, so normalized 20D state is discretized into the
   pi0.5 prompt token stream. Compute separate norm stats for this config before
@@ -153,7 +181,11 @@ The 1000-episode clean/recovery run uses the separate config
 id `aero_quest/piper_pipette_handoff_white_noise_1k`, dataset
 `a1_white_noise_train1000_250clean_750perturbed_320x320_30fps_v1`, and asset id
 `aero_quest/piper_pipette_handoff_white_noise_1k_pose_state`; do not point the
-historical 50-demo config at this dataset. Its schedule is warmup steps 0-499,
+historical 50-demo config at this dataset. This config also has
+`pi05=True, discrete_state_input=False`, so it is state-blind even though its
+asset id and historical run name contain `pose_state`; it trains on the three
+camera views and prompt, not the 20D observation-state values. Its schedule is
+warmup steps 0-499,
 `1e-4` through step 2999, `5e-5` for steps 3000-5999, and `2e-5` from step 6000
 through the 10k end. Global batch size is 512, so 10,000 steps over 1,141,373
 frames is `5,120,000 / 1,141,373 = 4.485825405` frame-level epochs. With
