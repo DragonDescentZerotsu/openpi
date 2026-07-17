@@ -24,22 +24,41 @@ T_co = TypeVar("T_co", covariant=True)
 
 AERO_HANDOFF_REPO_ID = "aero_quest/piper_pipette_handoff"
 AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID = "aero_quest/piper_pipette_handoff_white_noise_1k"
+AERO_TIP_ATTACHMENT_REPO_ID = "aero_quest/piper_aero_tip_attachment"
 SO_AEROHAND_ROOT = pathlib.Path(__file__).resolve().parents[5]
-AERO_HANDOFF_ROOTS = {
-    AERO_HANDOFF_REPO_ID: SO_AEROHAND_ROOT
-    / "outputs/lerobot/piper_pipette_handoff/a1_libero_like_train50_eval20_320x320_30fps",
-    AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID: SO_AEROHAND_ROOT / "outputs/lerobot/piper_pipette_handoff/"
-    "a1_white_noise_train1000_250clean_750perturbed_320x320_30fps_v1",
-}
 AERO_HANDOFF_PROMPT = (
     "Use the original Piper gripper to pick a pipette from the rack, hand it to the Aero Hand palm, "
     "and close four non-thumb fingers to hold the pipette."
 )
-AERO_HANDOFF_VIDEO_KEYS = (
+AERO_TIP_ATTACHMENT_PROMPT = (
+    "Insert the carried pipette into the next available tip in column-major order, attach it, "
+    "and lift it clear of the tip box."
+)
+AERO_DUAL_PIPER_DATASETS = {
+    AERO_HANDOFF_REPO_ID: (
+        SO_AEROHAND_ROOT
+        / "outputs/lerobot/piper_pipette_handoff/a1_libero_like_train50_eval20_320x320_30fps",
+        AERO_HANDOFF_PROMPT,
+    ),
+    AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID: (
+        SO_AEROHAND_ROOT
+        / "outputs/lerobot/piper_pipette_handoff/"
+        "a1_white_noise_train1000_250clean_750perturbed_320x320_30fps_v1",
+        AERO_HANDOFF_PROMPT,
+    ),
+    AERO_TIP_ATTACHMENT_REPO_ID: (
+        SO_AEROHAND_ROOT
+        / "outputs/lerobot/piper_aero_tip_attachment/a2_well_holdout_train760_eval40_v0",
+        AERO_TIP_ATTACHMENT_PROMPT,
+    ),
+}
+AERO_DUAL_PIPER_VIDEO_KEYS = (
     "observation.images.table_overview",
     "observation.images.gripper_forward",
     "observation.images.palm_inner",
 )
+# Historical public name retained for older project-side tests and scripts.
+AERO_HANDOFF_VIDEO_KEYS = AERO_DUAL_PIPER_VIDEO_KEYS
 IMAGE_CACHE_SIZE = 224
 
 
@@ -151,8 +170,8 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
-class AeroHandoffDataset(Dataset):
-    """Local reader for the generated A1 LeRobot v3 dataset.
+class AeroDualPiperDataset(Dataset):
+    """Local reader for generated dual-Piper LeRobot v3 datasets.
 
     The openpi-pinned LeRobot loader expects older per-episode metadata files.
     The generated SO_AeroHand dataset is a compact v3 chunked parquet/video
@@ -167,6 +186,7 @@ class AeroHandoffDataset(Dataset):
         *,
         state_mode: str = aero_handoff_policy.STATE_MODE_POSE,
         load_images: bool = True,
+        prompt: str = AERO_HANDOFF_PROMPT,
     ):
         import pandas as pd
 
@@ -174,9 +194,10 @@ class AeroHandoffDataset(Dataset):
         self._action_horizon = action_horizon
         self._state_mode = aero_handoff_policy.validate_state_mode(state_mode)
         self._load_images = bool(load_images)
+        self._prompt = str(prompt)
         parquet_files = sorted((root / "data").glob("**/*.parquet"))
         if not parquet_files:
-            raise ValueError(f"No A1 parquet files found under {root / 'data'}")
+            raise ValueError(f"No LeRobot parquet files found under {root / 'data'}")
         data_columns = [
             "observation.state",
             "action",
@@ -195,20 +216,24 @@ class AeroHandoffDataset(Dataset):
         source_policy_states = np.stack(table["observation.state"].map(np.asarray).to_numpy()).astype(np.float32)
         if source_policy_states.ndim != 2 or source_policy_states.shape[1] != aero_handoff_policy.STATE_DIM:
             raise ValueError(
-                f"Expected A1 source observation.state width {aero_handoff_policy.STATE_DIM}, "
+                f"Expected dual-Piper source observation.state width {aero_handoff_policy.STATE_DIM}, "
                 f"got {source_policy_states.shape}"
             )
         raw_actions = np.stack(table["action"].map(np.asarray).to_numpy()).astype(np.float32)
         if raw_actions.ndim != 2 or raw_actions.shape[1] != aero_handoff_policy.ACTION_DIM:
-            raise ValueError(f"Expected A1 action width {aero_handoff_policy.ACTION_DIM}, got {raw_actions.shape}")
+            raise ValueError(
+                f"Expected dual-Piper action width {aero_handoff_policy.ACTION_DIM}, got {raw_actions.shape}"
+            )
         self._actions = raw_actions
         if "controller.arm_qpos" not in table.columns:
-            raise ValueError("A1 pose-state datasets must include controller.arm_qpos for action chunk rebasing")
+            raise ValueError(
+                "Dual-Piper pose-state datasets must include controller.arm_qpos for action chunk rebasing"
+            )
         self._controller_arm_qpos = np.stack(table["controller.arm_qpos"].map(np.asarray).to_numpy()).astype(np.float32)
         expected_controller_dim = int(aero_handoff_policy.ARM_DELTA_MASK.sum())
         if self._controller_arm_qpos.ndim != 2 or self._controller_arm_qpos.shape[1] != expected_controller_dim:
             raise ValueError(
-                f"Expected A1 controller.arm_qpos width {expected_controller_dim}, "
+                f"Expected dual-Piper controller.arm_qpos width {expected_controller_dim}, "
                 f"got {self._controller_arm_qpos.shape}"
             )
         if self._state_mode == aero_handoff_policy.STATE_MODE_POSE:
@@ -224,7 +249,7 @@ class AeroHandoffDataset(Dataset):
                 axis=1,
             ).astype(np.float32)
         if self._policy_states.shape != source_policy_states.shape:
-            raise ValueError(f"Bad A1 {self._state_mode} state shape {self._policy_states.shape}")
+            raise ValueError(f"Bad dual-Piper {self._state_mode} state shape {self._policy_states.shape}")
         self._stage_index = table["observation.stage_index"].to_numpy(dtype=np.int64)
         self._timestamp = table["timestamp"].to_numpy(dtype=np.float32)
         self._frame_index = table["frame_index"].to_numpy(dtype=np.int64)
@@ -237,18 +262,22 @@ class AeroHandoffDataset(Dataset):
         for start, end in zip(episode_starts, episode_ends, strict=True):
             episode_index = int(self._episode_index[start])
             if episode_index in self._episode_bounds:
-                raise ValueError(f"A1 episode {episode_index} is not contiguous in the data parquet files")
+                raise ValueError(
+                    f"Dual-Piper episode {episode_index} is not contiguous in the data parquet files"
+                )
             expected_frames = np.arange(end - start, dtype=np.int64)
             if not np.array_equal(self._frame_index[start:end], expected_frames):
-                raise ValueError(f"A1 episode {episode_index} has non-contiguous frame_index values")
+                raise ValueError(
+                    f"Dual-Piper episode {episode_index} has non-contiguous frame_index values"
+                )
             self._episode_bounds[episode_index] = (int(start), int(end))
         info = json.loads((root / "meta" / "info.json").read_text(encoding="utf-8"))
         self._fps = int(info["fps"])
         episode_meta_files = sorted((root / "meta" / "episodes").glob("**/*.parquet"))
         if not episode_meta_files:
-            raise ValueError(f"No A1 episode metadata found under {root / 'meta' / 'episodes'}")
+            raise ValueError(f"No dual-Piper episode metadata found under {root / 'meta' / 'episodes'}")
         episode_meta_columns = ["episode_index"]
-        for key in AERO_HANDOFF_VIDEO_KEYS:
+        for key in AERO_DUAL_PIPER_VIDEO_KEYS:
             prefix = f"videos/{key}"
             episode_meta_columns.extend(
                 [
@@ -262,7 +291,7 @@ class AeroHandoffDataset(Dataset):
             ignore_index=True,
         )
         self._episode_video_refs: dict[str, dict[int, tuple[pathlib.Path, int]]] = {}
-        for key in AERO_HANDOFF_VIDEO_KEYS:
+        for key in AERO_DUAL_PIPER_VIDEO_KEYS:
             prefix = f"videos/{key}"
             required = (
                 "episode_index",
@@ -272,7 +301,7 @@ class AeroHandoffDataset(Dataset):
             )
             missing_columns = [column for column in required if column not in episode_meta.columns]
             if missing_columns:
-                raise ValueError(f"Missing A1 episode video metadata columns: {missing_columns}")
+                raise ValueError(f"Missing dual-Piper episode video metadata columns: {missing_columns}")
             refs: dict[int, tuple[pathlib.Path, int]] = {}
             for row in episode_meta.loc[:, list(required)].itertuples(index=False, name=None):
                 episode_index, chunk_index, file_index, from_timestamp = row
@@ -291,12 +320,12 @@ class AeroHandoffDataset(Dataset):
             }
         )
         if missing:
-            raise FileNotFoundError(f"Missing A1 video files: {missing}")
+            raise FileNotFoundError(f"Missing dual-Piper video files: {missing}")
         self._captures: dict[pathlib.Path, object] = {}
         self._image_arrays = None
         self._image_cache_paths = {
             key: root / "openpi_cache" / f"{key.replace('.', '_')}_{IMAGE_CACHE_SIZE}.npy"
-            for key in AERO_HANDOFF_VIDEO_KEYS
+            for key in AERO_DUAL_PIPER_VIDEO_KEYS
         }
 
     def __len__(self) -> int:
@@ -355,7 +384,7 @@ class AeroHandoffDataset(Dataset):
         query_indices = episode_start + query_local
         chunk = self._actions[query_indices].copy()
         mask = aero_handoff_policy.ARM_DELTA_MASK
-        # Stored A1 arm actions are per-frame next-target offsets
+        # Stored dual-Piper arm actions are per-frame next-target offsets
         # (target[k+1] - qpos[k]). A pi0/pi0.5 action chunk expects every arm
         # delta in the chunk to be relative to the controller qpos at the chunk
         # start, so convert to target[k+1] - qpos[index] here. The policy state
@@ -377,8 +406,12 @@ class AeroHandoffDataset(Dataset):
             "episode_index": np.asarray([self._episode_index[idx]], dtype=np.int64),
             "index": np.asarray([self._index[idx]], dtype=np.int64),
             "task_index": np.asarray([self._task_index[idx]], dtype=np.int64),
-            "prompt": AERO_HANDOFF_PROMPT,
+            "prompt": self._prompt,
         }
+
+
+# Backward-compatible import name for project code written before A2 reuse.
+AeroHandoffDataset = AeroDualPiperDataset
 
 
 def create_torch_dataset(
@@ -394,12 +427,14 @@ def create_torch_dataset(
         raise ValueError("Repo ID is not set. Cannot create dataset.")
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
-    if repo_id in AERO_HANDOFF_ROOTS:
-        return AeroHandoffDataset(
-            AERO_HANDOFF_ROOTS[repo_id],
+    if repo_id in AERO_DUAL_PIPER_DATASETS:
+        root, prompt = AERO_DUAL_PIPER_DATASETS[repo_id]
+        return AeroDualPiperDataset(
+            root,
             action_horizon,
             state_mode=data_config.state_mode or aero_handoff_policy.STATE_MODE_POSE,
             load_images=load_images,
+            prompt=prompt,
         )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)

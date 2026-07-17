@@ -91,7 +91,46 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None, num_workers: int | None = None):
+def normalized_action_metrics(
+    data_loader: _data_loader.Dataset,
+    num_batches: int,
+    action_stats: normalize.NormStats,
+    *,
+    use_quantiles: bool,
+) -> tuple[float, float]:
+    """Measure the exact normalized action scale over the source dataset."""
+
+    max_abs = 0.0
+    sum_squares = 0.0
+    count = 0
+    for batch in tqdm.tqdm(data_loader, total=num_batches, desc="Validating normalized actions"):
+        actions = np.asarray(batch["actions"], dtype=np.float64)
+        if use_quantiles:
+            assert action_stats.q01 is not None
+            assert action_stats.q99 is not None
+            normalized = (
+                (actions - action_stats.q01)
+                / (action_stats.q99 - action_stats.q01 + 1e-6)
+                * 2.0
+                - 1.0
+            )
+        else:
+            normalized = (actions - action_stats.mean) / (action_stats.std + 1e-6)
+        max_abs = max(max_abs, float(np.max(np.abs(normalized), initial=0.0)))
+        sum_squares += float(np.sum(np.square(normalized), dtype=np.float64))
+        count += int(normalized.size)
+    if count == 0:
+        raise ValueError("Cannot validate normalized actions from an empty dataset")
+    return max_abs, sum_squares / count
+
+
+def main(
+    config_name: str,
+    max_frames: int | None = None,
+    num_workers: int | None = None,
+    max_normalized_action_abs: float | None = None,
+    max_normalized_action_mse: float | None = None,
+):
     config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
@@ -117,6 +156,31 @@ def main(config_name: str, max_frames: int | None = None, num_workers: int | Non
             stats[key].update(np.asarray(batch[key]))
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
+
+    if max_normalized_action_abs is not None or max_normalized_action_mse is not None:
+        action_max_abs, action_mse = normalized_action_metrics(
+            data_loader,
+            num_batches,
+            norm_stats["actions"],
+            use_quantiles=data_config.use_quantile_norm,
+        )
+        print(
+            "Normalized action audit: "
+            f"max_abs={action_max_abs:.6g}, mean_square={action_mse:.6g}"
+        )
+        if (
+            max_normalized_action_abs is not None
+            and action_max_abs > max_normalized_action_abs
+        ):
+            raise ValueError(
+                f"Normalized action max_abs {action_max_abs:.6g} exceeds "
+                f"limit {max_normalized_action_abs:.6g}"
+            )
+        if max_normalized_action_mse is not None and action_mse > max_normalized_action_mse:
+            raise ValueError(
+                f"Normalized action mean_square {action_mse:.6g} exceeds "
+                f"limit {max_normalized_action_mse:.6g}"
+            )
 
     output_path = config.assets_dirs / (data_config.asset_id or data_config.repo_id)
     print(f"Writing stats to: {output_path}")

@@ -41,7 +41,7 @@ def test_aero_handoff_dataset_supports_multiple_data_and_video_shards(tmp_path: 
         )
 
     episode_rows = {"episode_index": [0, 1]}
-    for key in _data_loader.AERO_HANDOFF_VIDEO_KEYS:
+    for key in _data_loader.AERO_DUAL_PIPER_VIDEO_KEYS:
         prefix = f"videos/{key}"
         episode_rows[f"{prefix}/chunk_index"] = [0, 0]
         episode_rows[f"{prefix}/file_index"] = [0, 1]
@@ -56,20 +56,32 @@ def test_aero_handoff_dataset_supports_multiple_data_and_video_shards(tmp_path: 
     pd.DataFrame(episode_rows).to_parquet(episode_meta_path, index=False)
     (tmp_path / "meta" / "info.json").write_text(json.dumps({"fps": 30}), encoding="utf-8")
 
-    dataset = _data_loader.AeroHandoffDataset(tmp_path, action_horizon=3)
+    dataset = _data_loader.AeroDualPiperDataset(tmp_path, action_horizon=3)
 
     assert len(dataset) == 4
     np.testing.assert_array_equal(dataset._policy_states[:, 0], [0, 0, 1, 1])  # noqa: SLF001
     assert dataset._episode_bounds == {0: (0, 2), 1: (2, 4)}  # noqa: SLF001
-    for key in _data_loader.AERO_HANDOFF_VIDEO_KEYS:
+    for key in _data_loader.AERO_DUAL_PIPER_VIDEO_KEYS:
         assert dataset._episode_video_refs[key][0][0].name == "file-000.mp4"  # noqa: SLF001
         assert dataset._episode_video_refs[key][1][0].name == "file-001.mp4"  # noqa: SLF001
         assert dataset._episode_video_refs[key][1][1] == 15  # noqa: SLF001
     assert dataset._action_chunk(0).shape == (3, 20)  # noqa: SLF001
 
-    stats_dataset = _data_loader.AeroHandoffDataset(tmp_path, action_horizon=3, load_images=False)
-    for key in _data_loader.AERO_HANDOFF_VIDEO_KEYS:
+    stats_dataset = _data_loader.AeroDualPiperDataset(
+        tmp_path,
+        action_horizon=3,
+        load_images=False,
+    )
+    for key in _data_loader.AERO_DUAL_PIPER_VIDEO_KEYS:
         assert stats_dataset._read_image(key, 0).shape == (1, 1, 3)  # noqa: SLF001
+
+
+def test_a2_dataset_uses_task_specific_root_and_prompt():
+    root, prompt = _data_loader.AERO_DUAL_PIPER_DATASETS[_data_loader.AERO_TIP_ATTACHMENT_REPO_ID]
+
+    assert root.name == "a2_well_holdout_train760_eval40_v0"
+    assert "next available tip" in prompt
+    assert prompt != _data_loader.AERO_HANDOFF_PROMPT
 
 
 def test_torch_data_loader():

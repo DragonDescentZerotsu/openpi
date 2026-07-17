@@ -15,7 +15,7 @@ Use the dedicated conda environment:
 
 ```bash
 conda activate openpi_pi05
-cd /data1/tianang/Projects/SO_AeroHand/baselines/openpi
+cd baselines/openpi
 export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"
 GIT_LFS_SKIP_SMUDGE=1 uv sync --frozen
 ```
@@ -150,8 +150,8 @@ For A1 pi0.5 training, set the shared cache locations explicitly so downloaded
 assets and JAX compilation cache do not land inside the submodule:
 
 ```bash
-OPENPI_DATA_HOME=/data1/tianang/cache/openpi \
-JAX_COMPILATION_CACHE_DIR=/data1/tianang/cache/jax \
+OPENPI_DATA_HOME="$HOME/.cache/openpi" \
+JAX_COMPILATION_CACHE_DIR="$HOME/.cache/jax" \
 XLA_PYTHON_CLIENT_PREALLOCATE=false \
 conda run --no-capture-output -n openpi_pi05 \
   python scripts/train.py pi05_a1_piper_pipette_handoff \
@@ -207,6 +207,45 @@ The output is under
 stats do not depend on camera pixels, and decoding three videos per frame would
 only waste time.
 
+The A2 tip-attachment config is `pi05_a2_piper_aero_tip_attachment_10k`. It
+uses the local `aero_quest/piper_aero_tip_attachment` dataset at
+`outputs/lerobot/piper_aero_tip_attachment/a2_well_holdout_train760_eval40_v0`
+through the same dual-Piper 20D state/action reader, but with its own task
+prompt, asset id, norm stats, and checkpoint namespace. The dataset contains
+760 train episodes and 278,185 frames; the 40 fixed ID/OOD eval initializations
+remain outside the training parquet. This first A2 baseline intentionally
+matches the last A1 architecture and is therefore a three-camera image + prompt
+run with `discrete_state_input=False`; do not describe it as state-conditioned.
+Its schedule is also identical to the last A1 10k run: 500-step warmup,
+`1e-4` through step 2999, `5e-5` through step 5999, and `2e-5` thereafter.
+Use global batch 512 on 8 GPUs and save at step 5000 plus final step 9999.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n openpi_pi05 \
+  python scripts/compute_norm_stats.py \
+    --config-name pi05_a2_piper_aero_tip_attachment_10k \
+    --num-workers 0 \
+    --max-normalized-action-abs 10 \
+    --max-normalized-action-mse 2
+
+OPENPI_DATA_HOME="$HOME/.cache/openpi" \
+JAX_COMPILATION_CACHE_DIR="$HOME/.cache/jax" \
+XLA_PYTHON_CLIENT_PREALLOCATE=false \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+conda run --no-capture-output -n openpi_pi05 \
+  python scripts/train.py pi05_a2_piper_aero_tip_attachment_10k \
+    --exp-name a2_tip_attachment_train760_vision_only_lr1e4_drop3k5e5_drop6k2e5_b512_fsdp8_10k \
+    --overwrite \
+    --fsdp-devices 8
+```
+
+For A2, keep both normalized-action audit limits in the norm-stat command. The
+audit reuses the exact training transform over a second image-free data pass and
+fails before writing stats when `max_abs > 10` or normalized mean-square `> 2`.
+Do not replace this check with action clipping: extreme values here indicate a
+bad expert rollout (for example, a supposedly parked observation arm moving),
+which must be removed and replanned.
+
 The obsolete 2026-07-07 A1 command-delta debug run was:
 
 ```text
@@ -232,10 +271,10 @@ step3999 eval_id: 0/20
 step3999 train:   0/5
 ```
 
-Artifacts are under:
+Artifacts are under the parent repository path:
 
 ```text
-/data1/tianang/Projects/SO_AeroHand/outputs/openpi_eval/a1_piper_pipette_handoff
+outputs/openpi_eval/a1_piper_pipette_handoff
 ```
 
 Treat these checkpoints as invalid action-semantics debug results, not solved A1
@@ -249,7 +288,7 @@ exp: a1_train50_eval20_chunk_base_delta_b512_fsdp8_1k
 checkpoint: checkpoints/pi05_a1_piper_pipette_handoff/a1_train50_eval20_chunk_base_delta_b512_fsdp8_1k/999
 wandb: https://wandb.ai/reasonv/openpi/runs/ydbl8oim
 loss: 0.6244 -> 0.0047 over 1000 steps
-train rollout: /data1/tianang/Projects/SO_AeroHand/outputs/openpi_eval/a1_piper_pipette_handoff/pi05_chunk_base_delta_b512_fsdp8_step0999_train_ep000000_replan5
+train rollout: outputs/openpi_eval/a1_piper_pipette_handoff/pi05_chunk_base_delta_b512_fsdp8_step0999_train_ep000000_replan5
 train success: 0/1
 ```
 
