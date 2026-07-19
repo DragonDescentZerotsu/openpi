@@ -84,6 +84,18 @@ def test_a2_dataset_uses_task_specific_root_and_prompt():
     assert prompt != _data_loader.AERO_HANDOFF_PROMPT
 
 
+def test_a2_mixed_dataset_has_independent_repo_id_and_root():
+    root, prompt = _data_loader.AERO_DUAL_PIPER_DATASETS[
+        _data_loader.AERO_TIP_ATTACHMENT_MIXED_V1_REPO_ID
+    ]
+
+    assert root.name == "a2_well_holdout_train760_clean152_perturbed_eval40_v1"
+    assert prompt == _data_loader.AERO_TIP_ATTACHMENT_PROMPT
+    assert root != _data_loader.AERO_DUAL_PIPER_DATASETS[
+        _data_loader.AERO_TIP_ATTACHMENT_REPO_ID
+    ][0]
+
+
 def test_torch_data_loader():
     config = pi0_config.Pi0Config(action_dim=24, action_horizon=50, max_token_len=48)
     dataset = _data_loader.FakeDataset(config, 16)

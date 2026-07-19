@@ -25,11 +25,26 @@ def test_a1_white_noise_1k_schedule_and_config():
     assert values[9_999] == pytest.approx(2e-5)
 
 
-def test_a2_tip_attachment_schedule_and_config():
-    config = _config.get_config("pi05_a2_piper_aero_tip_attachment_10k")
+@pytest.mark.parametrize(
+    ("config_name", "repo_id", "asset_id"),
+    [
+        (
+            "pi05_a2_piper_aero_tip_attachment_10k",
+            "aero_quest/piper_aero_tip_attachment",
+            "aero_quest/piper_aero_tip_attachment_vision_only",
+        ),
+        (
+            "pi05_a2_piper_aero_tip_attachment_mixed_v1_10k",
+            "aero_quest/piper_aero_tip_attachment_mixed_v1",
+            "aero_quest/piper_aero_tip_attachment_mixed_v1_vision_only",
+        ),
+    ],
+)
+def test_a2_tip_attachment_schedule_and_config(config_name, repo_id, asset_id):
+    config = _config.get_config(config_name)
 
-    assert config.data.repo_id == "aero_quest/piper_aero_tip_attachment"
-    assert config.data.assets.asset_id == "aero_quest/piper_aero_tip_attachment_vision_only"
+    assert config.data.repo_id == repo_id
+    assert config.data.assets.asset_id == asset_id
     assert config.model.discrete_state_input is False
     assert config.num_train_steps == 10_000
     assert config.save_interval == 5_000

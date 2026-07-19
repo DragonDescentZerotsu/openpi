@@ -25,6 +25,7 @@ T_co = TypeVar("T_co", covariant=True)
 AERO_HANDOFF_REPO_ID = "aero_quest/piper_pipette_handoff"
 AERO_HANDOFF_WHITE_NOISE_1K_REPO_ID = "aero_quest/piper_pipette_handoff_white_noise_1k"
 AERO_TIP_ATTACHMENT_REPO_ID = "aero_quest/piper_aero_tip_attachment"
+AERO_TIP_ATTACHMENT_MIXED_V1_REPO_ID = "aero_quest/piper_aero_tip_attachment_mixed_v1"
 SO_AEROHAND_ROOT = pathlib.Path(__file__).resolve().parents[5]
 AERO_HANDOFF_PROMPT = (
     "Use the original Piper gripper to pick a pipette from the rack, hand it to the Aero Hand palm, "
@@ -49,6 +50,12 @@ AERO_DUAL_PIPER_DATASETS = {
     AERO_TIP_ATTACHMENT_REPO_ID: (
         SO_AEROHAND_ROOT
         / "outputs/lerobot/piper_aero_tip_attachment/a2_well_holdout_train760_eval40_v0",
+        AERO_TIP_ATTACHMENT_PROMPT,
+    ),
+    AERO_TIP_ATTACHMENT_MIXED_V1_REPO_ID: (
+        SO_AEROHAND_ROOT
+        / "outputs/lerobot/piper_aero_tip_attachment/"
+        "a2_well_holdout_train760_clean152_perturbed_eval40_v1",
         AERO_TIP_ATTACHMENT_PROMPT,
     ),
 }

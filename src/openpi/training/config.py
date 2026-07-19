@@ -925,6 +925,34 @@ _CONFIGS = [
         save_interval=5_000,
         keep_period=5_000,
     ),
+    TrainConfig(
+        name="pi05_a2_piper_aero_tip_attachment_mixed_v1_10k",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotAeroHandoffDataConfig(
+            repo_id="aero_quest/piper_aero_tip_attachment_mixed_v1",
+            assets=AssetsConfig(
+                asset_id="aero_quest/piper_aero_tip_attachment_mixed_v1_vision_only"
+            ),
+            state_mode=aero_handoff_policy.STATE_MODE_POSE,
+        ),
+        batch_size=512,
+        num_workers=16,
+        lr_schedule=_optimizer.WarmupThenStepSchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,
+            drop_step=3_000,
+            final_lr=5e-5,
+            second_drop_step=6_000,
+            second_final_lr=2e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=10_000,
+        log_interval=20,
+        save_interval=5_000,
+        keep_period=5_000,
+    ),
     #
     # Fine-tuning Aloha configs.
     #

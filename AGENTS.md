@@ -220,6 +220,16 @@ Its schedule is also identical to the last A1 10k run: 500-step warmup,
 `1e-4` through step 2999, `5e-5` through step 5999, and `2e-5` thereafter.
 Use global batch 512 on 8 GPUs and save at step 5000 plus final step 9999.
 
+The clean+recovery comparison is isolated as config
+`pi05_a2_piper_aero_tip_attachment_mixed_v1_10k`, repo id
+`aero_quest/piper_aero_tip_attachment_mixed_v1`, and asset id
+`aero_quest/piper_aero_tip_attachment_mixed_v1_vision_only`. It maps to
+`outputs/lerobot/piper_aero_tip_attachment/a2_well_holdout_train760_clean152_perturbed_eval40_v1`;
+the clean mapping above remains unchanged. Its independent norm stats passed
+the 2026-07-19 full-data audit (`max_abs=2.30054`, mean-square `0.75238`) and
+remain ignored under `assets/<config>/<asset-id>/`. Keep executable mixed-run
+commands in the parent repository's `scripts/training/AGENTS.md`.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 conda run --no-capture-output -n openpi_pi05 \
   python scripts/compute_norm_stats.py \
